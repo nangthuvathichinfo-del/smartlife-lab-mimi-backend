@@ -1,0 +1,19 @@
+version: "2"
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - gosec          # bảo mật: crypto yếu, file tạm, SSRF...
+    - bodyclose
+    - noctx          # mọi request mạng phải có context
+    - contextcheck
+    - errorlint      # so lỗi bằng errors.Is/As
+    - nilerr
+    - rowserrcheck
+formatters:
+  enable:
+    - gofmt
+    - goimports

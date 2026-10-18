@@ -1,0 +1,519 @@
+openapi: 3.1.0
+info:
+  title: Mimi API
+  license: { name: Proprietary, identifier: LicenseRef-Proprietary }
+  version: 0.1.0
+  description: |
+    API của Mimi V2 (backend Go trên Cloud Run, gọi qua Firebase Hosting tại /api).
+
+    Quy ước chung:
+    - Tiền là số nguyên đồng (VND). Mọi con số do server tính; client chỉ hiển thị.
+    - Ngày là chuỗi YYYY-MM-DD theo múi giờ của người dùng.
+    - Lỗi luôn có dạng Error với `code` ổn định; client dựa vào `code`, không dựa vào `message`.
+    - Thao tác ghi có thể gửi lại an toàn: hóa đơn dùng `receipt_id` do client sinh,
+      sửa tồn dùng `acted_at`, các thao tác còn lại là PUT/DELETE theo khóa cố định.
+    - Thành viên nhà (role=member) không bao giờ nhận trường giá hay chi tiêu.
+    - Mục `x-status: planned` là endpoint đã thiết kế nhưng khung server trả 501.
+servers:
+  - url: /api
+security:
+  - firebaseIdToken: []
+    appCheck: []
+
+tags:
+  - { name: system, description: Sức khỏe dịch vụ }
+  - { name: me, description: "Đăng nhập, Cài đặt, Quyền riêng tư (spec mục 1, 6)" }
+  - { name: home, description: Trang chủ (spec mục 2) }
+  - { name: receipts, description: "Quét, Xác nhận, Đã lưu" }
+  - { name: items, description: "Đồ dùng, Chi tiết món, Cần mua (spec mục 4, 5)" }
+  - { name: spending, description: "Sổ chi tiêu, Dự báo 30 ngày, Khoản chi định kỳ (spec mục 3)" }
+  - { name: plan, description: "Kế hoạch mua sắm, Giỏ, Giá tốt (spec mục 5)" }
+  - { name: household, description: "Nhà mình, lời nhờ mua (spec mục 6)" }
+
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      security: []
+      summary: Tiến trình còn sống
+      responses: { "200": { description: OK } }
+  /readyz:
+    get:
+      tags: [system]
+      security: []
+      summary: Sẵn sàng phục vụ (đọc thử Firestore, không gọi Gemini)
+      responses: { "200": { description: Ready }, "503": { description: Not ready } }
+
+  # ---------------- Me & cài đặt ----------------
+  /me:
+    get:
+      tags: [me]
+      summary: Hồ sơ, vai trò, cài đặt
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Profile" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [me]
+      x-status: planned
+      summary: Xóa hết dữ liệu của mình
+      description: |
+        Xóa đệ quy users/{uid}, giải tán nhà nếu là chủ, rồi xóa tài khoản Auth sau cùng.
+        Gọi lại sau khi lỗi giữa chừng sẽ chạy tiếp (idempotent). Yêu cầu token chưa bị thu hồi.
+      responses:
+        "204": { description: Đã xóa }
+        "401": { $ref: "#/components/responses/Error" }
+  /settings:
+    put:
+      tags: [me]
+      x-status: planned
+      summary: Cập nhật cài đặt (lead_days 1..30, nhắc, tin sale, ngôn ngữ dịch)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /home:
+    get:
+      tags: [home]
+      x-status: planned
+      summary: Số phụ của 4 ô Trang chủ trong một lần gọi
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/HomeSummary" } } } }
+  /notifications:
+    get:
+      tags: [home]
+      x-status: planned
+      summary: Chuông thông báo (đọc từ digests và items)
+      responses: { "200": { description: OK } }
+
+  # ---------------- Hóa đơn ----------------
+  /receipts/read:
+    post:
+      tags: [receipts]
+      summary: Đọc ảnh của một hóa đơn, trả bản nháp (không lưu ảnh)
+      description: |
+        Tối đa 8 ảnh, mỗi ảnh tối đa 4 MiB (đã nén ở máy). Trừ 1 lượt trong quota 20 hóa đơn/ngày
+        chỉ khi đọc thành công. Gửi lại cùng receipt_id trong vòng 1 giờ trả bản nháp cũ, không gọi lại AI.
+        Thời gian xử lý tối đa 55 giây.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [receipt_id, images]
+              properties:
+                receipt_id: { $ref: "#/components/schemas/ClientId" }
+                lang: { type: string, enum: [vi, en], default: vi }
+                images: { type: array, maxItems: 8, items: { type: string, format: binary } }
+      responses:
+        "200": { description: Bản nháp, content: { application/json: { schema: { $ref: "#/components/schemas/Draft" } } } }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "422": { description: "receipt_unreadable hoặc validation_failed", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "429": { description: "quota_exceeded (fields.limit) hoặc rate_limited", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: ai_unavailable, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /receipts:
+    post:
+      tags: [receipts]
+      summary: Lưu hóa đơn đã xác nhận (đường ghi duy nhất đổi tồn kho và chi tiêu)
+      description: |
+        Server tính lại mọi con số. Ghi trong một transaction: receipt, purchases, items của các nhóm,
+        months, plan_items khớp nhóm chuyển done, lời nhờ mua khớp nhóm đóng lại, receipt_count.
+        Cùng receipt_id và cùng nội dung: 200 replayed=true. Khác nội dung: 409 receipt_conflict.
+        Giống hóa đơn đã có (cửa hàng, ngày, tổng): 409 possible_duplicate, gửi lại với confirm_duplicate=true.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SaveReceipt" } } } }
+      responses:
+        "201": { description: Đã lưu, content: { application/json: { schema: { $ref: "#/components/schemas/SaveResult" } } } }
+        "200": { description: "Gửi lại, kết quả cũ", content: { application/json: { schema: { $ref: "#/components/schemas/SaveResult" } } } }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [receipts]
+      x-status: planned
+      summary: Lịch sử hóa đơn (phân trang theo con trỏ)
+      parameters:
+        - { name: month, in: query, schema: { type: string, pattern: "^\\d{4}-\\d{2}$" } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses: { "200": { description: OK } }
+  /receipts/{id}/lines/{lineId}:
+    patch:
+      tags: [receipts]
+      x-status: planned
+      summary: Sửa sau khi lưu, chỉ cờ habit và nhóm hàng của một dòng (tính lại tồn, không đổi tiền)
+      parameters:
+        - { name: id, in: path, required: true, schema: { $ref: "#/components/schemas/ClientId" } }
+        - { name: lineId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                habit: { type: boolean }
+                category_key: { type: string }
+      responses: { "200": { description: OK } }
+
+  # ---------------- Đồ dùng ----------------
+  /items:
+    get:
+      tags: [items]
+      summary: Danh sách món (chủ giỏ)
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [soon, active], default: active } }
+        - { name: horizon, in: query, schema: { type: integer, enum: [3, 7, 14], default: 7 } }
+        - { name: q, in: query, description: Tìm không dấu, schema: { type: string, maxLength: 80 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/Item" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+  /items/{key}:
+    get:
+      tags: [items]
+      x-status: planned
+      summary: Chi tiết món, kèm lịch sử mua (truy vấn purchases, không lưu bản sao)
+      parameters: [{ $ref: "#/components/parameters/ItemKey" }]
+      responses: { "200": { description: OK } }
+    patch:
+      tags: [items]
+      x-status: planned
+      summary: Sửa tên và loại (lưu classification_corrections), hỏi lại sau, bỏ món
+      parameters: [{ $ref: "#/components/parameters/ItemKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string, maxLength: 120 }
+                category_key: { type: string }
+                ask_later_until: { type: string, format: date }
+                dropped: { type: boolean }
+      responses: { "200": { description: OK } }
+  /items/{key}/stock:
+    patch:
+      tags: [items]
+      summary: Còn nhiều / Sắp hết / Đã hết hoặc nhập 1..60 ngày
+      description: Thao tác cũ hơn bản sửa đang có (hàng đợi offline gửi muộn) không ghi đè, trả trạng thái hiện tại.
+      parameters: [{ $ref: "#/components/parameters/ItemKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StockChange" } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Item" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /items/{key}/override:
+    delete:
+      tags: [items]
+      summary: Hoàn tác bản sửa tay (không gửi cả tài liệu món)
+      parameters:
+        - { $ref: "#/components/parameters/ItemKey" }
+        - { name: acted_at, in: query, required: true, schema: { type: string, format: date-time } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Item" } } } }
+  /needs:
+    get:
+      tags: [items]
+      x-status: planned
+      summary: Cần mua (cùng quy tắc với số trên ô Trang chủ)
+      parameters: [{ name: horizon, in: query, schema: { type: integer, enum: [3, 7, 14], default: 7 } }]
+      responses: { "200": { description: OK } }
+
+  # ---------------- Chi tiêu ----------------
+  /spending:
+    get:
+      tags: [spending]
+      x-status: planned
+      summary: Sổ chi tiêu theo tháng (chỉ chủ giỏ)
+      parameters: [{ name: month, in: query, required: true, schema: { type: string, pattern: "^\\d{4}-\\d{2}$" } }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Spending" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+  /forecast:
+    get:
+      tags: [spending]
+      x-status: planned
+      summary: Dự báo 30 ngày (định kỳ + kế hoạch + món dự đoán hết, không tính trùng)
+      parameters: [{ name: days, in: query, schema: { type: integer, enum: [30], default: 30 } }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Forecast" } } } } }
+  /recurring:
+    get: { tags: [spending], x-status: planned, summary: Khoản định kỳ và voucher, responses: { "200": { description: OK } } }
+    post: { tags: [spending], x-status: planned, summary: Thêm khoản định kỳ, responses: { "201": { description: Created } } }
+  /recurring/{id}:
+    patch: { tags: [spending], x-status: planned, summary: Sửa khoản, parameters: [{ name: id, in: path, required: true, schema: { type: string } }], responses: { "200": { description: OK } } }
+    delete: { tags: [spending], x-status: planned, summary: Xóa khoản, parameters: [{ name: id, in: path, required: true, schema: { type: string } }], responses: { "204": { description: Deleted } } }
+  /recurring/scan:
+    post:
+      tags: [spending]
+      x-status: planned
+      summary: Đọc hóa đơn thanh toán dịch vụ (nhà cung cấp, số tiền, hạn); không lưu cho tới khi người dùng chọn Lưu
+      responses: { "200": { description: OK } }
+
+  # ---------------- Kế hoạch ----------------
+  /plan:
+    get:
+      tags: [plan]
+      x-status: planned
+      summary: Giỏ, thời gian mua, ghi chú, Dự kiến chi
+      responses: { "200": { description: OK } }
+  /plan/items/{key}:
+    put: { tags: [plan], x-status: planned, summary: Cho món vào giỏ (một dòng mở mỗi nhóm), parameters: [{ $ref: "#/components/parameters/ItemKey" }], responses: { "200": { description: OK } } }
+    delete: { tags: [plan], x-status: planned, summary: Bỏ món khỏi giỏ, parameters: [{ $ref: "#/components/parameters/ItemKey" }], responses: { "204": { description: Deleted } } }
+  /plan/state:
+    put:
+      tags: [plan]
+      x-status: planned
+      summary: buy_date, buy_hour, trip_note (≤120 ký tự), planned_at, calendar_opened_at
+      responses: { "200": { description: OK } }
+  /plan/prices:
+    get:
+      tags: [plan]
+      x-status: planned
+      summary: Nơi mua tối ưu và Giá tốt (một hàm tính chung cho Giỏ và Giá tốt)
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PlanPrices" } } } } }
+
+  # ---------------- Nhà mình ----------------
+  /households:
+    get: { tags: [household], x-status: planned, summary: Nhà của tôi và thành viên, responses: { "200": { description: OK } } }
+    patch: { tags: [household], x-status: planned, summary: Tắt giỏ chung (chủ giỏ), responses: { "200": { description: OK } } }
+  /households/invites:
+    post:
+      tags: [household]
+      x-status: planned
+      summary: Mời bằng email (link dùng một lần, hết hạn 7 ngày, tối đa 10 lời mời đang chờ)
+      responses: { "201": { description: Created }, "409": { $ref: "#/components/responses/Error" } }
+  /households/join:
+    post: { tags: [household], x-status: planned, summary: Vào nhà bằng token mời, responses: { "200": { description: OK } } }
+  /households/leave:
+    post: { tags: [household], x-status: planned, summary: Thành viên rời nhà, responses: { "204": { description: Left } } }
+  /households/members/{uid}:
+    delete: { tags: [household], x-status: planned, summary: Chủ giỏ xóa thành viên, parameters: [{ name: uid, in: path, required: true, schema: { type: string } }], responses: { "204": { description: Removed } } }
+  /households/needs:
+    get:
+      tags: [household]
+      summary: Món sắp hết của nhà cho thành viên (không có giá)
+      parameters: [{ name: horizon, in: query, schema: { type: integer, enum: [3, 7, 14], default: 7 } }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/SharedItem" } } } }
+  /households/asks:
+    post: { tags: [household], x-status: planned, summary: "Nhờ người nhà mua (chỉ tên món, không giá)", responses: { "201": { description: Created } } }
+  /households/asks/{id}/bought:
+    post: { tags: [household], x-status: planned, summary: Người nhận báo đã mua, parameters: [{ name: id, in: path, required: true, schema: { type: string } }], responses: { "200": { description: OK } } }
+
+components:
+  securitySchemes:
+    firebaseIdToken: { type: http, scheme: bearer, bearerFormat: Firebase ID token }
+    appCheck: { type: apiKey, in: header, name: X-Firebase-AppCheck }
+
+  parameters:
+    ItemKey:
+      name: key
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/ClientId" }
+
+  responses:
+    Error:
+      description: Lỗi có mã ổn định
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  schemas:
+    ClientId:
+      type: string
+      pattern: "^[a-z0-9-]{1,64}$"
+    Vnd:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Số tiền tính bằng đồng
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [bad_request, validation_failed, unauthenticated, app_check_failed, forbidden, not_found,
+                 conflict, receipt_conflict, possible_duplicate, payload_too_large, unsupported_media,
+                 quota_exceeded, rate_limited, receipt_unreadable, ai_unavailable, not_implemented, internal, timeout]
+        message: { type: string, description: "Câu tiếng Việt ngắn, an toàn để hiển thị" }
+        fields: { type: object, additionalProperties: true }
+    Settings:
+      type: object
+      additionalProperties: false
+      properties:
+        display_name: { type: string, maxLength: 40 }
+        lead_days: { type: integer, minimum: 1, maximum: 30 }
+        remind_enabled: { type: boolean }
+        remind_freq: { type: string }
+        digest_time: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+        timezone: { type: string, default: Asia/Ho_Chi_Minh }
+        channels: { type: array, items: { type: string, enum: [in_app, email] } }
+        replacement_enabled: { type: boolean }
+        sale_enabled: { type: boolean }
+        lang: { type: string, enum: [vi, en], description: "Ngôn ngữ dịch hóa đơn, không phải ngôn ngữ giao diện" }
+    Profile:
+      type: object
+      properties:
+        uid: { type: string }
+        display_name: { type: string }
+        role: { type: string, enum: [owner, member] }
+        household_id: { type: string }
+        receipt_count: { type: integer }
+        settings: { $ref: "#/components/schemas/Settings" }
+    HomeSummary:
+      type: object
+      properties:
+        spent_this_month: { oneOf: [{ $ref: "#/components/schemas/Vnd" }, { type: "null" }] }
+        needs_count: { type: integer }
+        plan: { type: object, properties: { item_count: { type: integer }, estimate: { oneOf: [{ $ref: "#/components/schemas/Vnd" }, { type: "null" }] }, missing_price: { type: integer } } }
+        receipt_count: { type: integer }
+        unread_notifications: { type: integer }
+    DraftLine:
+      type: object
+      properties:
+        line_id: { type: string }
+        name: { type: string }
+        qty: { type: number }
+        amount: { type: string, description: Nguyên văn trên hóa đơn }
+        amount_vnd: { oneOf: [{ $ref: "#/components/schemas/Vnd" }, { type: "null" }] }
+        category_key: { type: string, description: Rỗng thì hiện nút Chọn nhóm }
+        group_key: { type: string }
+        habit: { type: boolean }
+    Draft:
+      type: object
+      properties:
+        receipt_id: { $ref: "#/components/schemas/ClientId" }
+        store: { type: string }
+        purchased_on: { type: string, format: date }
+        currency: { type: string }
+        total_printed: { type: string }
+        discount_total: { type: string }
+        lines: { type: array, items: { $ref: "#/components/schemas/DraftLine" } }
+        sum_vnd: { $ref: "#/components/schemas/Vnd" }
+        total_mismatch: { type: boolean }
+        fx: { type: object, properties: { rate: { type: string }, source: { type: string }, at: { type: string, format: date-time } } }
+        fx_missing: { type: boolean, description: Chưa có tỷ giá có nguồn; dòng ngoại tệ không cộng vào chi tiêu }
+        pages: { type: integer }
+        unreadable_pages: { type: integer }
+    SaveReceipt:
+      type: object
+      additionalProperties: false
+      required: [receipt_id, purchased_on, lines]
+      properties:
+        receipt_id: { $ref: "#/components/schemas/ClientId" }
+        store: { type: string }
+        purchased_on: { type: string, format: date }
+        currency: { type: string, default: VND }
+        discount_total: { type: string }
+        use_for_prediction: { type: boolean, default: true }
+        confirm_duplicate: { type: boolean, default: false }
+        lines:
+          type: array
+          minItems: 1
+          maxItems: 150
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, qty, amount]
+            properties:
+              line_id: { type: string }
+              name: { type: string, maxLength: 120 }
+              qty: { type: number, exclusiveMinimum: 0, maximum: 1000 }
+              amount: { type: string }
+              category_key: { type: string }
+              group_key: { type: string }
+              habit: { type: boolean, description: "Tại nhà (true) hay Chuyến đi (false)" }
+    SaveResult:
+      type: object
+      properties:
+        receipt_id: { type: string }
+        status: { type: string, enum: [saved] }
+        replayed: { type: boolean }
+    Item:
+      type: object
+      properties:
+        key: { type: string }
+        name: { type: string }
+        category_key: { type: string }
+        status: { $ref: "#/components/schemas/StockStatus" }
+        days_left: { oneOf: [{ type: integer, minimum: 0 }, { type: "null" }] }
+        predicted_out_on: { type: string, format: date }
+        interval_days: { type: integer }
+        purchase_count: { type: integer }
+        confidence: { type: string, enum: [low, mid, high] }
+        source: { type: string, enum: [predicted, manual] }
+    SharedItem:
+      type: object
+      description: Dạng rút gọn cho thành viên nhà. Không có trường giá.
+      properties:
+        key: { type: string }
+        name: { type: string }
+        status: { $ref: "#/components/schemas/StockStatus" }
+        days_left: { oneOf: [{ type: integer }, { type: "null" }] }
+    StockStatus:
+      type: string
+      enum: [out, buy_now, soon, upcoming, plenty, waiting]
+    StockChange:
+      type: object
+      additionalProperties: false
+      required: [acted_at]
+      properties:
+        quick: { type: string, enum: [plenty, soon, out] }
+        days: { type: integer, minimum: 1, maximum: 60 }
+        acted_at: { type: string, format: date-time, description: Lúc người dùng bấm (để xếp thứ tự thao tác offline) }
+    Spending:
+      type: object
+      properties:
+        month: { type: string }
+        spent: { $ref: "#/components/schemas/Vnd" }
+        spent_prev_month_pct: { type: number }
+        saved: { $ref: "#/components/schemas/Vnd" }
+        saved_ratio: { type: number, description: "discount / (spent + discount); null khi không có discount" }
+        by_category: { type: array, items: { type: object, properties: { key: { type: string }, amount: { $ref: "#/components/schemas/Vnd" }, pct: { type: number } } } }
+        top_saving_receipts: { type: array, maxItems: 3, items: { type: object } }
+        recent_receipts: { type: array, maxItems: 3, items: { type: object } }
+    Forecast:
+      type: object
+      properties:
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        total: { $ref: "#/components/schemas/Vnd" }
+        estimated: { type: boolean }
+        recurring: { type: array, items: { type: object } }
+        planned: { type: array, items: { type: object } }
+        predicted: { type: array, items: { type: object } }
+        missing_price: { type: array, items: { type: string } }
+        not_enough_data: { type: array, items: { type: string } }
+    PlanPrices:
+      type: object
+      properties:
+        single_store: { type: [object, "null"] }
+        split: { type: array, items: { type: object } }
+        split_total: { $ref: "#/components/schemas/Vnd" }
+        saving: { $ref: "#/components/schemas/Vnd" }
+        recommend: { type: string, enum: [single, split] }
+        missing_price: { type: array, items: { type: string } }
+        single_source: { type: array, items: { type: string } }
+        sale_offers:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            required: [url, fetched_at]
+            properties:
+              name: { type: string }
+              price: { $ref: "#/components/schemas/Vnd" }
+              store: { type: string }
+              url: { type: string, format: uri, pattern: "^https://" }
+              fetched_at: { type: string, format: date-time }
+              sources: { type: integer, description: "1 = chưa đủ để so sánh" }

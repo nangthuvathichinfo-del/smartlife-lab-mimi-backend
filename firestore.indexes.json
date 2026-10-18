@@ -1,0 +1,41 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "purchases",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "group_key", "order": "ASCENDING" },
+        { "fieldPath": "habit", "order": "ASCENDING" },
+        { "fieldPath": "purchased_on", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "users",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "settings.remind_enabled", "order": "ASCENDING" },
+        { "fieldPath": "next_notify_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "fx_rates",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "currency", "order": "ASCENDING" },
+        { "fieldPath": "on", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "asks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "group_key", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    { "collectionGroup": "drafts", "fieldPath": "expire_at", "ttl": true, "indexes": [] },
+    { "collectionGroup": "quota", "fieldPath": "expire_at", "ttl": true, "indexes": [] }
+  ]
+}
