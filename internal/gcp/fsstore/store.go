@@ -23,6 +23,7 @@ import (
 
 	"github.com/smartlife-lab/mimi/backend/internal/apperr"
 	"github.com/smartlife-lab/mimi/backend/internal/authz"
+	"github.com/smartlife-lab/mimi/backend/internal/domain"
 	"github.com/smartlife-lab/mimi/backend/internal/user"
 )
 
@@ -68,6 +69,9 @@ func (s *Store) LoadPrincipal(ctx context.Context, uid string) (authz.Principal,
 		doc := map[string]any{
 			"role": "owner", "receipt_count": 0, "created_at": firestore.ServerTimestamp,
 			"settings": map[string]any{"lead_days": 7, "timezone": "Asia/Ho_Chi_Minh", "lang": "vi", "remind_enabled": true},
+			// Có next_notify_at thì job digest mới tìm thấy người dùng này (truy vấn theo index).
+			"next_notify_at": domain.NextDigestAt(time.Now(), domain.Location("Asia/Ho_Chi_Minh"),
+				domain.DefaultDigestHour, domain.DefaultDigestMinute),
 		}
 		if _, err := ref.Create(ctx, doc); err != nil && status.Code(err) != codes.AlreadyExists {
 			return authz.Principal{}, fmt.Errorf("create user: %w", err)

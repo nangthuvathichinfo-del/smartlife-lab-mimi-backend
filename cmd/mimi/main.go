@@ -25,11 +25,15 @@ import (
 	"github.com/smartlife-lab/mimi/backend/internal/gcp/fbauth"
 	"github.com/smartlife-lab/mimi/backend/internal/gcp/fsstore"
 	"github.com/smartlife-lab/mimi/backend/internal/gcp/gemini"
+	"github.com/smartlife-lab/mimi/backend/internal/home"
 	"github.com/smartlife-lab/mimi/backend/internal/httpapi"
 	"github.com/smartlife-lab/mimi/backend/internal/item"
 	"github.com/smartlife-lab/mimi/backend/internal/notify"
+	"github.com/smartlife-lab/mimi/backend/internal/plan"
 	"github.com/smartlife-lab/mimi/backend/internal/platform/logx"
 	"github.com/smartlife-lab/mimi/backend/internal/receipt"
+	"github.com/smartlife-lab/mimi/backend/internal/spending"
+	"github.com/smartlife-lab/mimi/backend/internal/user"
 )
 
 func main() {
@@ -97,9 +101,15 @@ func serveAPI(ctx context.Context, cfg config.Config, log *slog.Logger, store *f
 	if cfg.AppCheckRequired {
 		appCheck = auth
 	}
+	items := item.New(store, nil)
+	planSvc := plan.New(store, store, nil)
 	api, err := httpapi.New(httpapi.Deps{
 		Log: log, Tokens: auth, AppCheck: appCheck, Principals: store, Profiles: store,
-		Receipts: receipts, Items: item.New(store, nil), Ready: store,
+		Receipts: receipts, Items: items, Ready: store,
+		Home:     home.New(store, items, planSvc, nil),
+		Plan:     planSvc,
+		Spending: spending.New(store),
+		Settings: user.NewSettingsService(store, nil),
 	}, httpapi.WithTimeouts(cfg.ReadTimeout, cfg.DefaultTimeout))
 	if err != nil {
 		return err

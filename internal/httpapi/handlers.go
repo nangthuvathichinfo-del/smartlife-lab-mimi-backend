@@ -12,7 +12,9 @@ import (
 
 	"github.com/smartlife-lab/mimi/backend/internal/apperr"
 	"github.com/smartlife-lab/mimi/backend/internal/item"
+	"github.com/smartlife-lab/mimi/backend/internal/plan"
 	"github.com/smartlife-lab/mimi/backend/internal/receipt"
+	"github.com/smartlife-lab/mimi/backend/internal/user"
 )
 
 const (
@@ -190,6 +192,97 @@ func (s *Server) undoStock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, it)
+}
+
+func (s *Server) getItem(w http.ResponseWriter, r *http.Request) {
+	d, err := s.items.Get(r.Context(), principalFrom(r.Context()), r.PathValue("key"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
+func (s *Server) getHome(w http.ResponseWriter, r *http.Request) {
+	sum, err := s.home.Get(r.Context(), principalFrom(r.Context()))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sum)
+}
+
+func (s *Server) getSpending(w http.ResponseWriter, r *http.Request) {
+	rep, err := s.spending.Get(r.Context(), principalFrom(r.Context()), r.URL.Query().Get("month"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
+	var patch user.SettingsPatch
+	if err := decodeJSON(w, r, &patch, maxJSONBody); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	view, err := s.settings.Update(r.Context(), principalFrom(r.Context()), patch)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) getPlan(w http.ResponseWriter, r *http.Request) {
+	cart, err := s.plan.Get(r.Context(), principalFrom(r.Context()))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cart)
+}
+
+// addPlanItem: PUT không có thân; khóa nhóm nằm trên đường dẫn. Trả giỏ sau khi thêm.
+func (s *Server) addPlanItem(w http.ResponseWriter, r *http.Request) {
+	cart, err := s.plan.Add(r.Context(), principalFrom(r.Context()), r.PathValue("key"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cart)
+}
+
+func (s *Server) removePlanItem(w http.ResponseWriter, r *http.Request) {
+	if err := s.plan.Remove(r.Context(), principalFrom(r.Context()), r.PathValue("key")); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) putPlanState(w http.ResponseWriter, r *http.Request) {
+	var st plan.State
+	if err := decodeJSON(w, r, &st, maxJSONBody); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	saved, err := s.plan.SetState(r.Context(), principalFrom(r.Context()), st)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) getPlanPrices(w http.ResponseWriter, r *http.Request) {
+	pr, err := s.plan.Prices(r.Context(), principalFrom(r.Context()))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, pr)
 }
 
 func (s *Server) notImplemented(w http.ResponseWriter, r *http.Request) {

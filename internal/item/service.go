@@ -37,7 +37,30 @@ type Store interface {
 	ClearOverride(ctx context.Context, uid, groupKey string, setAt time.Time) (Record, error)
 	// OwnerOf trả uid chủ nhà để thành viên đọc danh sách dùng chung.
 	OwnerOf(ctx context.Context, householdID string) (string, error)
+	// History trả các lần mua thói quen gần nhất của một nhóm, mới nhất trước
+	// (truy vấn purchases theo index group_key + habit + purchased_on).
+	History(ctx context.Context, uid, groupKey string, limit int) ([]HistoryEntry, error)
 }
+
+// HistoryEntry là một lần mua trong Chi tiết món. Chỉ chủ giỏ đọc được (có giá).
+type HistoryEntry struct {
+	On        string `json:"on"` // YYYY-MM-DD
+	Store     string `json:"store,omitempty"`
+	AmountVND *int64 `json:"amount_vnd"` // nil khi dòng chưa quy đổi được sang VND
+	ReceiptID string `json:"receipt_id,omitempty"`
+}
+
+// Detail là phản hồi GET /items/{key}: mọi trường của Item kèm lịch sử mua.
+type Detail struct {
+	Item
+	History []HistoryEntry `json:"history"`
+}
+
+// historyLimit: số lần mua hiển thị trong Chi tiết món.
+const historyLimit = 10
+
+// NeedsHorizonDays là khoảng ngày mặc định của "Cần mua" và số trên ô Trang chủ.
+const NeedsHorizonDays = 7
 
 // Item là dữ liệu đầy đủ cho chủ giỏ.
 type Item struct {
@@ -150,6 +173,65 @@ func (s *Service) ListShared(ctx context.Context, p authz.Principal, horizon int
 	return out, nil
 }
 
+// Get trả Chi tiết món cho chủ giỏ, kèm tối đa historyLimit lần mua gần nhất.
+func (s *Service) Get(ctx context.Context, p authz.Principal, key string) (Detail, error) {
+	if err := authz.Can(p, authz.ActionReadItemsFull); err != nil {
+		return Detail{}, err
+	}
+	if !ValidKey(key) {
+		return Detail{}, apperr.ErrNotFound
+	}
+	rec, err := s.store.GetItem(ctx, p.UID, key)
+	if err != nil {
+		return Detail{}, err
+	}
+	hist, err := s.store.History(ctx, p.UID, key, historyLimit)
+	if err != nil {
+		return Detail{}, err
+	}
+	if hist == nil {
+		hist = []HistoryEntry{} // JSON trả [] thay vì null
+	}
+	v := domain.ViewAt(rec.Prediction, domain.Today(s.now(), loc(p)), lead(p))
+	return Detail{Item: toItem(rec, v), History: hist}, nil
+}
+
+// CountNeeds đếm món trong "Cần mua" với khoảng ngày horizon, cùng quy tắc với màn
+// Đồ dùng (tab "soon"). Thành viên nhà đếm trên danh sách dùng chung của chủ nhà.
+func (s *Service) CountNeeds(ctx context.Context, p authz.Principal, horizon int) (int, error) {
+	if p.Role == authz.RoleMember {
+		shared, err := s.ListShared(ctx, p, horizon)
+		if err != nil {
+			return 0, err
+		}
+		return len(shared), nil
+	}
+	if err := authz.Can(p, authz.ActionReadItemsFull); err != nil {
+		return 0, err
+	}
+	recs, err := s.store.ListItems(ctx, p.UID)
+	if err != nil {
+		return 0, err
+	}
+	today := domain.Today(s.now(), loc(p))
+	n := 0
+	for _, r := range recs {
+		if !r.Dropped && domain.InNeeds(domain.ViewAt(r.Prediction, today, lead(p)), horizon) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// ValidKey kiểm tra khóa nhóm trước khi dùng làm ID tài liệu Firestore: không rỗng,
+// không quá dài, không chứa "/", không phải "." hay "..", không có dạng __x__ (ID dành riêng).
+func ValidKey(key string) bool {
+	if key == "" || len(key) > 128 || key == "." || key == ".." || strings.Contains(key, "/") {
+		return false
+	}
+	return !(strings.HasPrefix(key, "__") && strings.HasSuffix(key, "__"))
+}
+
 // StockChange là thao tác "Còn nhiều / Sắp hết / Đã hết" hoặc nhập số ngày.
 // ActedAt là lúc người dùng bấm (client gửi), để thao tác xếp hàng offline gửi muộn
 // không đè lên thao tác mới hơn.
@@ -165,6 +247,9 @@ const maxClockSkew = 5 * time.Minute
 func (s *Service) ChangeStock(ctx context.Context, p authz.Principal, key string, c StockChange) (Item, error) {
 	if err := authz.Can(p, authz.ActionWriteItems); err != nil {
 		return Item{}, err
+	}
+	if !ValidKey(key) {
+		return Item{}, apperr.ErrNotFound
 	}
 	now := s.now()
 	if c.ActedAt.IsZero() || c.ActedAt.After(now.Add(maxClockSkew)) {
@@ -193,6 +278,9 @@ func (s *Service) ChangeStock(ctx context.Context, p authz.Principal, key string
 func (s *Service) UndoStock(ctx context.Context, p authz.Principal, key string, actedAt time.Time) (Item, error) {
 	if err := authz.Can(p, authz.ActionWriteItems); err != nil {
 		return Item{}, err
+	}
+	if !ValidKey(key) {
+		return Item{}, apperr.ErrNotFound
 	}
 	rec, err := s.store.ClearOverride(ctx, p.UID, key, actedAt)
 	if err != nil {
@@ -236,11 +324,4 @@ func lead(p authz.Principal) int {
 	return 7
 }
 
-func loc(p authz.Principal) *time.Location {
-	if p.Timezone != "" {
-		if l, err := time.LoadLocation(p.Timezone); err == nil {
-			return l
-		}
-	}
-	return time.FixedZone("ICT", 7*3600)
-}
+func loc(p authz.Principal) *time.Location { return domain.Location(p.Timezone) }

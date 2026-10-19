@@ -11,7 +11,18 @@ import (
 	"github.com/smartlife-lab/mimi/backend/internal/domain"
 )
 
-type memStore struct{ recs map[string]map[string]Record }
+type memStore struct {
+	recs map[string]map[string]Record
+	hist map[string][]HistoryEntry // group_key -> lịch sử, mới nhất trước
+}
+
+func (m *memStore) History(_ context.Context, _ string, k string, limit int) ([]HistoryEntry, error) {
+	h := m.hist[k]
+	if len(h) > limit {
+		h = h[:limit]
+	}
+	return h, nil
+}
 
 func (m *memStore) ListItems(_ context.Context, uid string) ([]Record, error) {
 	var out []Record
@@ -105,6 +116,65 @@ func TestItems(t *testing.T) {
 			if _, err := svc.ChangeStock(context.Background(), owner, "gao", c); !errors.As(err, &ae) || ae.Code != apperr.CodeValidation {
 				t.Errorf("case %d: err=%v", i, err)
 			}
+		}
+	})
+}
+
+func TestDetailAndNeedsCount(t *testing.T) {
+	now := time.Date(2026, 10, 16, 3, 0, 0, 0, time.UTC)
+	amt := int64(32000)
+	st := &memStore{
+		recs: map[string]map[string]Record{"owner": {
+			"sua":   {GroupKey: "sua", Name: "Sữa tươi", Prediction: domain.Prediction{OutOn: date("2026-10-16"), PurchaseCount: 5, Source: "predicted"}},
+			"gao":   {GroupKey: "gao", Name: "Gạo", Prediction: domain.Prediction{OutOn: date("2026-11-20"), PurchaseCount: 4, Source: "predicted"}},
+			"bot":   {GroupKey: "bot", Name: "Bột giặt", Prediction: domain.Prediction{OutOn: date("2026-10-18"), PurchaseCount: 3, Source: "predicted"}, Dropped: true},
+			"keo":   {GroupKey: "keo", Name: "Kẹo", Prediction: domain.Prediction{OutOn: date("2026-10-17"), PurchaseCount: 1, Source: "predicted"}}, // chưa đủ dữ liệu
+			"trung": {GroupKey: "trung", Name: "Trứng", Prediction: domain.Prediction{OutOn: date("2026-10-26"), PurchaseCount: 3, Source: "predicted"}},
+		}},
+		hist: map[string][]HistoryEntry{"sua": {{On: "2026-10-01", Store: "Co.op", AmountVND: &amt}, {On: "2026-09-20"}}},
+	}
+	svc := New(st, func() time.Time { return now })
+	owner := authz.Principal{UID: "owner", Role: authz.RoleOwner, Timezone: "Asia/Ho_Chi_Minh", LeadDays: 7}
+	member := authz.Principal{UID: "m1", Role: authz.RoleMember, HouseholdID: "h1"}
+	ctx := context.Background()
+
+	t.Run("detail has item fields and history", func(t *testing.T) {
+		d, err := svc.Get(ctx, owner, "sua")
+		if err != nil || d.Key != "sua" || d.Status != domain.StatusBuyNow || len(d.History) != 2 || *d.History[0].AmountVND != 32000 {
+			t.Fatalf("err=%v d=%+v", err, d)
+		}
+	})
+	t.Run("detail without history is empty list, not nil", func(t *testing.T) {
+		d, err := svc.Get(ctx, owner, "gao")
+		if err != nil || d.History == nil || len(d.History) != 0 {
+			t.Fatalf("err=%v hist=%v", err, d.History)
+		}
+	})
+	t.Run("unknown or invalid key is 404", func(t *testing.T) {
+		for _, k := range []string{"khong-co", "", "..", "__x__", "a/b"} {
+			if _, err := svc.Get(ctx, owner, k); !errors.Is(err, apperr.ErrNotFound) {
+				t.Errorf("key %q: err=%v", k, err)
+			}
+		}
+	})
+	t.Run("member cannot read detail", func(t *testing.T) {
+		if _, err := svc.Get(ctx, member, "sua"); !errors.Is(err, apperr.ErrForbidden) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("needs count skips dropped and waiting items", func(t *testing.T) {
+		// sua: hết hôm nay; trung: còn 10 ngày (ngoài 7); bot: đã bỏ; keo: chưa đủ dữ liệu.
+		n, err := svc.CountNeeds(ctx, owner, 7)
+		if err != nil || n != 1 {
+			t.Fatalf("err=%v n=%d", err, n)
+		}
+		if n, _ := svc.CountNeeds(ctx, owner, 14); n != 2 {
+			t.Fatalf("horizon 14: n=%d", n)
+		}
+	})
+	t.Run("member count uses shared list", func(t *testing.T) {
+		if n, err := svc.CountNeeds(ctx, member, 7); err != nil || n != 1 {
+			t.Fatalf("err=%v n=%d", err, n)
 		}
 	})
 }

@@ -11,8 +11,11 @@ import (
 	"time"
 
 	"github.com/smartlife-lab/mimi/backend/internal/authz"
+	"github.com/smartlife-lab/mimi/backend/internal/home"
 	"github.com/smartlife-lab/mimi/backend/internal/item"
+	"github.com/smartlife-lab/mimi/backend/internal/plan"
 	"github.com/smartlife-lab/mimi/backend/internal/receipt"
+	"github.com/smartlife-lab/mimi/backend/internal/spending"
 	"github.com/smartlife-lab/mimi/backend/internal/user"
 )
 
@@ -36,9 +39,26 @@ type (
 	}
 	Items interface {
 		List(ctx context.Context, p authz.Principal, q item.Query) ([]item.Item, error)
+		Get(ctx context.Context, p authz.Principal, key string) (item.Detail, error)
 		ListShared(ctx context.Context, p authz.Principal, horizon int) ([]item.SharedItem, error)
 		ChangeStock(ctx context.Context, p authz.Principal, key string, c item.StockChange) (item.Item, error)
 		UndoStock(ctx context.Context, p authz.Principal, key string, actedAt time.Time) (item.Item, error)
+	}
+	Home interface {
+		Get(ctx context.Context, p authz.Principal) (home.Summary, error)
+	}
+	Spending interface {
+		Get(ctx context.Context, p authz.Principal, month string) (spending.Report, error)
+	}
+	Plan interface {
+		Get(ctx context.Context, p authz.Principal) (plan.Cart, error)
+		Add(ctx context.Context, p authz.Principal, key string) (plan.Cart, error)
+		Remove(ctx context.Context, p authz.Principal, key string) error
+		SetState(ctx context.Context, p authz.Principal, st plan.State) (plan.State, error)
+		Prices(ctx context.Context, p authz.Principal) (plan.Prices, error)
+	}
+	Settings interface {
+		Update(ctx context.Context, p authz.Principal, patch user.SettingsPatch) (map[string]any, error)
 	}
 	ReadinessChecker interface {
 		Ready(ctx context.Context) error
@@ -57,6 +77,10 @@ type Deps struct {
 	Profiles   Profiles
 	Receipts   Receipts
 	Items      Items
+	Home       Home
+	Spending   Spending
+	Settings   Settings
+	Plan       Plan
 	Ready      ReadinessChecker
 	Metrics    Metrics // nil: không ghi metric
 }
@@ -69,6 +93,10 @@ type Server struct {
 	profiles   Profiles
 	receipts   Receipts
 	items      Items
+	home       Home
+	spending   Spending
+	settings   Settings
+	plan       Plan
 	ready      ReadinessChecker
 	metrics    Metrics
 	limiter    *windowLimiter
@@ -90,12 +118,14 @@ func WithWriteLimit(perMinute int) Option {
 }
 
 func New(d Deps, opts ...Option) (*Server, error) {
-	if d.Log == nil || d.Tokens == nil || d.Principals == nil || d.Receipts == nil || d.Items == nil || d.Ready == nil || d.Profiles == nil {
+	if d.Log == nil || d.Tokens == nil || d.Principals == nil || d.Receipts == nil || d.Items == nil || d.Ready == nil || d.Profiles == nil ||
+		d.Home == nil || d.Spending == nil || d.Settings == nil || d.Plan == nil {
 		return nil, errors.New("httpapi: missing required dependency")
 	}
 	s := &Server{
 		log: d.Log, tokens: d.Tokens, appCheck: d.AppCheck, principals: d.Principals,
 		profiles: d.Profiles, receipts: d.Receipts, items: d.Items, ready: d.Ready, metrics: d.Metrics,
+		home: d.Home, spending: d.Spending, settings: d.Settings, plan: d.Plan,
 		limiter: newWindowLimiter(60), readTimeout: 55 * time.Second, defaultTimeout: 10 * time.Second,
 	}
 	if s.metrics == nil {
@@ -131,12 +161,21 @@ func (s *Server) Handler() http.Handler {
 	public("GET /readyz", s.readyz)
 
 	private("GET /me", s.defaultTimeout, s.getMe)
+	private("PUT /settings", s.defaultTimeout, s.putSettings)
+	private("GET /home", s.defaultTimeout, s.getHome)
 	private("POST /receipts/read", s.readTimeout, s.readReceipt)
 	private("POST /receipts", s.defaultTimeout, s.saveReceipt)
 	private("GET /items", s.defaultTimeout, s.listItems)
+	private("GET /items/{key}", s.defaultTimeout, s.getItem)
 	private("PATCH /items/{key}/stock", s.defaultTimeout, s.changeStock)
 	private("DELETE /items/{key}/override", s.defaultTimeout, s.undoStock)
 	private("GET /households/needs", s.defaultTimeout, s.listSharedNeeds)
+	private("GET /spending", s.defaultTimeout, s.getSpending)
+	private("GET /plan", s.defaultTimeout, s.getPlan)
+	private("PUT /plan/items/{key}", s.defaultTimeout, s.addPlanItem)
+	private("DELETE /plan/items/{key}", s.defaultTimeout, s.removePlanItem)
+	private("PUT /plan/state", s.defaultTimeout, s.putPlanState)
+	private("GET /plan/prices", s.defaultTimeout, s.getPlanPrices)
 
 	// Các endpoint còn lại đã có trong api/openapi.yaml nhưng chưa dựng ở khung này.
 	for _, p := range notYetImplemented {
@@ -150,12 +189,11 @@ func (s *Server) Handler() http.Handler {
 }
 
 var notYetImplemented = []string{
-	"GET /home", "PUT /settings", "DELETE /me",
-	"GET /needs", "GET /items/{key}", "PATCH /items/{key}",
+	"DELETE /me",
+	"GET /needs", "PATCH /items/{key}",
 	"PATCH /receipts/{id}/lines/{lineId}", "GET /receipts",
-	"GET /spending", "GET /forecast",
+	"GET /forecast",
 	"GET /recurring", "POST /recurring", "PATCH /recurring/{id}", "DELETE /recurring/{id}", "POST /recurring/scan",
-	"GET /plan", "PUT /plan/items/{key}", "DELETE /plan/items/{key}", "PUT /plan/state", "GET /plan/prices",
 	"GET /households", "PATCH /households", "POST /households/invites", "POST /households/join",
 	"DELETE /households/members/{uid}", "POST /households/leave",
 	"POST /households/asks", "POST /households/asks/{id}/bought",

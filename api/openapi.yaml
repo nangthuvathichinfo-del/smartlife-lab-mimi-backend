@@ -43,6 +43,18 @@ paths:
       security: []
       summary: Sẵn sàng phục vụ (đọc thử Firestore, không gọi Gemini)
       responses: { "200": { description: Ready }, "503": { description: Not ready } }
+  /health:
+    get:
+      tags: [system]
+      security: []
+      summary: Như /healthz. Dùng khi gọi qua URL công khai của Cloud Run, nơi /healthz bị Google Frontend chặn
+      responses: { "200": { description: OK } }
+  /ready:
+    get:
+      tags: [system]
+      security: []
+      summary: Như /readyz
+      responses: { "200": { description: Ready }, "503": { description: Not ready } }
 
   # ---------------- Me & cài đặt ----------------
   /me:
@@ -65,18 +77,23 @@ paths:
   /settings:
     put:
       tags: [me]
-      x-status: planned
       summary: Cập nhật cài đặt (lead_days 1..30, nhắc, tin sale, ngôn ngữ dịch)
+      description: |
+        Chỉ gửi các trường muốn đổi; trường vắng mặt giữ nguyên. Trường lạ trả 400 bad_request.
+        Đổi remind_enabled, digest_time hoặc timezone thì server tính lại lượt gửi bản tin kế tiếp.
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
       responses:
-        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
-        "422": { $ref: "#/components/responses/Error" }
+        "200": { description: Cài đặt sau khi lưu, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "422": { description: "validation_failed, fields.field là trường sai", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
   /home:
     get:
       tags: [home]
-      x-status: planned
       summary: Số phụ của 4 ô Trang chủ trong một lần gọi
+      description: |
+        needs_count dùng cùng quy tắc với tab "Sắp hết" khoảng 7 ngày của màn Đồ dùng.
+        Thành viên nhà luôn nhận spent_this_month = null và plan rỗng (không thấy chi tiêu của chủ nhà).
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/HomeSummary" } } } }
   /notifications:
@@ -176,10 +193,12 @@ paths:
   /items/{key}:
     get:
       tags: [items]
-      x-status: planned
-      summary: Chi tiết món, kèm lịch sử mua (truy vấn purchases, không lưu bản sao)
+      summary: Chi tiết món, kèm tối đa 10 lần mua gần nhất (truy vấn purchases, không lưu bản sao)
       parameters: [{ $ref: "#/components/parameters/ItemKey" }]
-      responses: { "200": { description: OK } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ItemDetail" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
     patch:
       tags: [items]
       x-status: planned
@@ -229,12 +248,12 @@ paths:
   /spending:
     get:
       tags: [spending]
-      x-status: planned
       summary: Sổ chi tiêu theo tháng (chỉ chủ giỏ)
       parameters: [{ name: month, in: query, required: true, schema: { type: string, pattern: "^\\d{4}-\\d{2}$" } }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Spending" } } } }
         "403": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
   /forecast:
     get:
       tags: [spending]
@@ -259,23 +278,39 @@ paths:
   /plan:
     get:
       tags: [plan]
-      x-status: planned
-      summary: Giỏ, thời gian mua, ghi chú, Dự kiến chi
-      responses: { "200": { description: OK } }
+      summary: Giỏ đang mở, tồn hiện tại và giá rẻ nhất đã biết của từng món, ước tính, thông tin chuyến mua
+      description: |
+        Giá là giá mỗi đơn vị người dùng từng trả (từ hóa đơn đã lưu, chỉ dòng "dùng để dự đoán").
+        estimate theo phương án khuyên dùng của /plan/prices; món chưa có giá đếm ở missing_price, không cộng vào.
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Cart" } } } }
+        "403": { $ref: "#/components/responses/Error" }
   /plan/items/{key}:
-    put: { tags: [plan], x-status: planned, summary: Cho món vào giỏ (một dòng mở mỗi nhóm), parameters: [{ $ref: "#/components/parameters/ItemKey" }], responses: { "200": { description: OK } } }
-    delete: { tags: [plan], x-status: planned, summary: Bỏ món khỏi giỏ, parameters: [{ $ref: "#/components/parameters/ItemKey" }], responses: { "204": { description: Deleted } } }
+    put:
+      tags: [plan]
+      summary: Cho món trong Đồ dùng vào giỏ (một dòng mở mỗi nhóm, gọi lại không tạo thêm dòng). Không có thân.
+      parameters: [{ $ref: "#/components/parameters/ItemKey" }]
+      responses:
+        "200": { description: Giỏ sau khi thêm, content: { application/json: { schema: { $ref: "#/components/schemas/Cart" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { description: "Giỏ đã đủ 100 món (fields.limit)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    delete:
+      tags: [plan]
+      summary: Bỏ món khỏi giỏ (món không có trong giỏ vẫn trả 204)
+      parameters: [{ $ref: "#/components/parameters/ItemKey" }]
+      responses: { "204": { description: Deleted } }
   /plan/state:
     put:
       tags: [plan]
-      x-status: planned
-      summary: buy_date, buy_hour, trip_note (≤120 ký tự), planned_at, calendar_opened_at
-      responses: { "200": { description: OK } }
+      summary: Ngày, giờ và ghi chú cho chuyến mua
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlanState" } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PlanState" } } } }
+        "422": { $ref: "#/components/responses/Error" }
   /plan/prices:
     get:
       tags: [plan]
-      x-status: planned
-      summary: Nơi mua tối ưu và Giá tốt (một hàm tính chung cho Giỏ và Giá tốt)
+      summary: Nơi mua tối ưu (một hàm tính chung cho Giỏ, Giá tốt và ô Trang chủ)
       responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PlanPrices" } } } } }
 
   # ---------------- Nhà mình ----------------
@@ -452,6 +487,22 @@ components:
         purchase_count: { type: integer }
         confidence: { type: string, enum: [low, mid, high] }
         source: { type: string, enum: [predicted, manual] }
+    ItemDetail:
+      allOf:
+        - $ref: "#/components/schemas/Item"
+        - type: object
+          properties:
+            history:
+              type: array
+              maxItems: 10
+              description: Mới nhất trước
+              items:
+                type: object
+                properties:
+                  on: { type: string, format: date }
+                  store: { type: string }
+                  amount_vnd: { oneOf: [{ $ref: "#/components/schemas/Vnd" }, { type: "null" }] }
+                  receipt_id: { type: string }
     SharedItem:
       type: object
       description: Dạng rút gọn cho thành viên nhà. Không có trường giá.
@@ -476,12 +527,21 @@ components:
       properties:
         month: { type: string }
         spent: { $ref: "#/components/schemas/Vnd" }
-        spent_prev_month_pct: { type: number }
+        spent_prev_month_pct: { type: [number, "null"], description: "Phần trăm so với tháng trước; null khi tháng trước chưa có chi tiêu" }
         saved: { $ref: "#/components/schemas/Vnd" }
-        saved_ratio: { type: number, description: "discount / (spent + discount); null khi không có discount" }
+        saved_ratio: { type: [number, "null"], description: "discount / (spent + discount); null khi không có discount" }
+        receipt_count: { type: integer }
         by_category: { type: array, items: { type: object, properties: { key: { type: string }, amount: { $ref: "#/components/schemas/Vnd" }, pct: { type: number } } } }
-        top_saving_receipts: { type: array, maxItems: 3, items: { type: object } }
-        recent_receipts: { type: array, maxItems: 3, items: { type: object } }
+        top_saving_receipts: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/ReceiptSummary" } }
+        recent_receipts: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/ReceiptSummary" } }
+    ReceiptSummary:
+      type: object
+      properties:
+        receipt_id: { type: string }
+        store: { type: string }
+        purchased_on: { type: string, format: date }
+        total_vnd: { $ref: "#/components/schemas/Vnd" }
+        discount_vnd: { $ref: "#/components/schemas/Vnd" }
     Forecast:
       type: object
       properties:
@@ -494,6 +554,32 @@ components:
         predicted: { type: array, items: { type: object } }
         missing_price: { type: array, items: { type: string } }
         not_enough_data: { type: array, items: { type: string } }
+    PlanState:
+      type: object
+      additionalProperties: false
+      properties:
+        buy_date: { type: string, description: "YYYY-MM-DD hoặc chuỗi rỗng; từ 7 ngày trước đến 1 năm tới" }
+        buy_hour: { type: [integer, "null"], minimum: 0, maximum: 23 }
+        trip_note: { type: string, maxLength: 120 }
+    Cart:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              name: { type: string }
+              category_key: { type: string }
+              status: { $ref: "#/components/schemas/StockStatus" }
+              days_left: { type: [integer, "null"] }
+              unit_price: { oneOf: [{ $ref: "#/components/schemas/Vnd" }, { type: "null" }] }
+              best_store: { type: string }
+        item_count: { type: integer }
+        estimate: { oneOf: [{ $ref: "#/components/schemas/Vnd" }, { type: "null" }] }
+        missing_price: { type: integer }
+        state: { $ref: "#/components/schemas/PlanState" }
     PlanPrices:
       type: object
       properties:
