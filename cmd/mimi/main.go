@@ -27,6 +27,7 @@ import (
 	"github.com/smartlife-lab/mimi/backend/internal/gcp/gemini"
 	"github.com/smartlife-lab/mimi/backend/internal/home"
 	"github.com/smartlife-lab/mimi/backend/internal/httpapi"
+	"github.com/smartlife-lab/mimi/backend/internal/inbox"
 	"github.com/smartlife-lab/mimi/backend/internal/item"
 	"github.com/smartlife-lab/mimi/backend/internal/notify"
 	"github.com/smartlife-lab/mimi/backend/internal/plan"
@@ -108,6 +109,7 @@ func serveAPI(ctx context.Context, cfg config.Config, log *slog.Logger, store *f
 		Receipts: receipts, Items: items, Ready: store,
 		Home:     home.New(store, items, planSvc, nil),
 		Plan:     planSvc,
+		Notes:    inbox.New(items, planSvc, nil),
 		Spending: spending.New(store),
 		Settings: user.NewSettingsService(store, nil),
 	}, httpapi.WithTimeouts(cfg.ReadTimeout, cfg.DefaultTimeout))

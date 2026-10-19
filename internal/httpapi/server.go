@@ -12,6 +12,7 @@ import (
 
 	"github.com/smartlife-lab/mimi/backend/internal/authz"
 	"github.com/smartlife-lab/mimi/backend/internal/home"
+	"github.com/smartlife-lab/mimi/backend/internal/inbox"
 	"github.com/smartlife-lab/mimi/backend/internal/item"
 	"github.com/smartlife-lab/mimi/backend/internal/plan"
 	"github.com/smartlife-lab/mimi/backend/internal/receipt"
@@ -57,6 +58,9 @@ type (
 		SetState(ctx context.Context, p authz.Principal, st plan.State) (plan.State, error)
 		Prices(ctx context.Context, p authz.Principal) (plan.Prices, error)
 	}
+	Notifications interface {
+		List(ctx context.Context, p authz.Principal) (inbox.List, error)
+	}
 	Settings interface {
 		Update(ctx context.Context, p authz.Principal, patch user.SettingsPatch) (map[string]any, error)
 	}
@@ -81,6 +85,7 @@ type Deps struct {
 	Spending   Spending
 	Settings   Settings
 	Plan       Plan
+	Notes      Notifications
 	Ready      ReadinessChecker
 	Metrics    Metrics // nil: không ghi metric
 }
@@ -97,6 +102,7 @@ type Server struct {
 	spending   Spending
 	settings   Settings
 	plan       Plan
+	notes      Notifications
 	ready      ReadinessChecker
 	metrics    Metrics
 	limiter    *windowLimiter
@@ -119,13 +125,13 @@ func WithWriteLimit(perMinute int) Option {
 
 func New(d Deps, opts ...Option) (*Server, error) {
 	if d.Log == nil || d.Tokens == nil || d.Principals == nil || d.Receipts == nil || d.Items == nil || d.Ready == nil || d.Profiles == nil ||
-		d.Home == nil || d.Spending == nil || d.Settings == nil || d.Plan == nil {
+		d.Home == nil || d.Spending == nil || d.Settings == nil || d.Plan == nil || d.Notes == nil {
 		return nil, errors.New("httpapi: missing required dependency")
 	}
 	s := &Server{
 		log: d.Log, tokens: d.Tokens, appCheck: d.AppCheck, principals: d.Principals,
 		profiles: d.Profiles, receipts: d.Receipts, items: d.Items, ready: d.Ready, metrics: d.Metrics,
-		home: d.Home, spending: d.Spending, settings: d.Settings, plan: d.Plan,
+		home: d.Home, spending: d.Spending, settings: d.Settings, plan: d.Plan, notes: d.Notes,
 		limiter: newWindowLimiter(60), readTimeout: 55 * time.Second, defaultTimeout: 10 * time.Second,
 	}
 	if s.metrics == nil {
@@ -176,6 +182,7 @@ func (s *Server) Handler() http.Handler {
 	private("DELETE /plan/items/{key}", s.defaultTimeout, s.removePlanItem)
 	private("PUT /plan/state", s.defaultTimeout, s.putPlanState)
 	private("GET /plan/prices", s.defaultTimeout, s.getPlanPrices)
+	private("GET /notifications", s.defaultTimeout, s.getNotifications)
 
 	// Các endpoint còn lại đã có trong api/openapi.yaml nhưng chưa dựng ở khung này.
 	for _, p := range notYetImplemented {
@@ -197,5 +204,4 @@ var notYetImplemented = []string{
 	"GET /households", "PATCH /households", "POST /households/invites", "POST /households/join",
 	"DELETE /households/members/{uid}", "POST /households/leave",
 	"POST /households/asks", "POST /households/asks/{id}/bought",
-	"GET /notifications",
 }

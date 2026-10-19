@@ -99,9 +99,32 @@ paths:
   /notifications:
     get:
       tags: [home]
-      x-status: planned
-      summary: Chuông thông báo (đọc từ digests và items)
-      responses: { "200": { description: OK } }
+      summary: Thông báo, suy ra lúc đọc (không lưu, chưa có trạng thái đã đọc)
+      description: |
+        Chủ giỏ: chuyến mua hẹn hôm nay hoặc ngày mai khi giỏ còn món (kind=trip), rồi các món trong
+        "Cần mua" 7 ngày (kind=item). Thành viên nhà: chỉ món sắp hết của nhà, không có giá hay chuyến mua.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        kind: { type: string, enum: [item, trip] }
+                        item_key: { type: string }
+                        name: { type: string }
+                        status: { $ref: "#/components/schemas/StockStatus" }
+                        days_left: { type: [integer, "null"] }
+                        date: { type: string, format: date }
+                        hour: { type: [integer, "null"] }
+                        item_count: { type: integer }
 
   # ---------------- Hóa đơn ----------------
   /receipts/read:

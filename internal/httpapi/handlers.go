@@ -285,6 +285,15 @@ func (s *Server) getPlanPrices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, pr)
 }
 
+func (s *Server) getNotifications(w http.ResponseWriter, r *http.Request) {
+	list, err := s.notes.List(r.Context(), principalFrom(r.Context()))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
 func (s *Server) notImplemented(w http.ResponseWriter, r *http.Request) {
 	s.writeError(w, r, apperr.New(apperr.CodeNotImplemented, "Chức năng này chưa có trên máy chủ."))
 }

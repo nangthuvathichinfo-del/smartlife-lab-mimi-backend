@@ -16,6 +16,7 @@ import (
 	"github.com/smartlife-lab/mimi/backend/internal/authz"
 	"github.com/smartlife-lab/mimi/backend/internal/domain"
 	"github.com/smartlife-lab/mimi/backend/internal/home"
+	"github.com/smartlife-lab/mimi/backend/internal/inbox"
 	"github.com/smartlife-lab/mimi/backend/internal/item"
 	"github.com/smartlife-lab/mimi/backend/internal/plan"
 	"github.com/smartlife-lab/mimi/backend/internal/receipt"
@@ -147,6 +148,12 @@ func (fakePlanItems) ListItems(context.Context, string) ([]item.Record, error) {
 	return []item.Record{{GroupKey: "sua", Name: "Sữa"}}, nil
 }
 
+type fakeNotes struct{}
+
+func (fakeNotes) List(context.Context, authz.Principal) (inbox.List, error) {
+	return inbox.List{Items: []inbox.Note{{ID: "item:sua", Kind: "item", ItemKey: "sua"}}}, nil
+}
+
 type fakeReady struct{}
 
 func (fakeReady) Ready(context.Context) error { return nil }
@@ -164,7 +171,8 @@ func newTestServer(t *testing.T) (http.Handler, *fakeReceipts) {
 		},
 		Profiles: fakeProfiles{}, Receipts: rc, Items: fakeItems{}, Ready: fakeReady{},
 		Home: fakeHome{}, Spending: spending.New(fakeSpendingStore{}), Settings: user.NewSettingsService(fakeSettingsStore{}, nil),
-		Plan: plan.New(&fakePlanStore{lines: map[string]plan.Line{}}, fakePlanItems{}, nil),
+		Plan:  plan.New(&fakePlanStore{lines: map[string]plan.Line{}}, fakePlanItems{}, nil),
+		Notes: fakeNotes{},
 	}, WithWriteLimit(2))
 	if err != nil {
 		t.Fatal(err)
@@ -336,6 +344,11 @@ func TestServer(t *testing.T) {
 		}
 		if rec, _ := do(h9, "GET", "/api/plan", "member-tok", ""); rec.Code != 403 {
 			t.Fatalf("member status %d", rec.Code)
+		}
+	})
+	t.Run("notifications", func(t *testing.T) {
+		if rec, body := do(h, "GET", "/api/notifications", "owner-tok", ""); rec.Code != 200 || body["items"] == nil {
+			t.Fatalf("status %d body %v", rec.Code, body)
 		}
 	})
 	t.Run("planned endpoints answer 501", func(t *testing.T) {
